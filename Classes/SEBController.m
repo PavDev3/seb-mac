@@ -156,6 +156,27 @@ bool insideMatrix(void);
 @implementation SEBController
 
 
+#pragma mark - Developer quit bypass (local builds only)
+
+// Runtime-only escape hatch for local development builds: when the
+// SEB_DEV_BYPASS_QUIT environment variable is set (e.g. via the Xcode scheme's
+// "Arguments" tab), .seb-imposed quit/force-quit lockdown is ignored so a
+// dev machine never gets stuck testing a restrictive config. Distributed
+// builds are run without this variable set, so behavior there is unchanged.
+static BOOL SEBDevBypassQuitEnabled(void)
+{
+    static BOOL enabled;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        enabled = [NSProcessInfo processInfo].environment[@"SEB_DEV_BYPASS_QUIT"] != nil;
+        if (enabled) {
+            DDLogWarn(@"SEB_DEV_BYPASS_QUIT is set: quit/force-quit restrictions from .seb configs are disabled for this run.");
+        }
+    });
+    return enabled;
+}
+
+
 #pragma mark - Properties and Accessors
 
 @synthesize f3Pressed;	//create getter and setter for F3 key pressed flag
@@ -905,8 +926,9 @@ bool insideMatrix(void);
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
     DDLogDebug(@"%s", __FUNCTION__);
-    NSApp.presentationOptions |= (NSApplicationPresentationDisableForceQuit | NSApplicationPresentationHideDock);
-    
+    NSApp.presentationOptions |= (SEBDevBypassQuitEnabled() ? NSApplicationPresentationHideDock
+                                                             : (NSApplicationPresentationDisableForceQuit | NSApplicationPresentationHideDock));
+
     NSArray <NSString *> *libraryDirs = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory,
                                                               NSLocalDomainMask | NSUserDomainMask,
                                                               YES);
@@ -4005,7 +4027,8 @@ static NSString * const kSEBWiFiKeychainService = @"org.safeexambrowser.SEB.wifi
             if (_isAACEnabled == YES && _wasAACEnabled == NO) {
                 void (^startAssessmentMode)(void) =
                 ^{
-                    NSApp.presentationOptions |= (NSApplicationPresentationDisableForceQuit | NSApplicationPresentationHideDock);
+                    NSApp.presentationOptions |= (SEBDevBypassQuitEnabled() ? NSApplicationPresentationHideDock
+                                                                             : (NSApplicationPresentationDisableForceQuit | NSApplicationPresentationHideDock));
                     DDLogDebug(@"_isAACEnabled = true && _wasAACEnabled == false");
                     AssessmentModeManager *assessmentModeManager = [[AssessmentModeManager alloc] initWithCallback:callback selector:selector fallback:NO];
                     self.assessmentModeManager = assessmentModeManager;
@@ -7839,6 +7862,7 @@ conditionallyForWindow:(NSWindow *)window
             [preferences setSecureBool:YES forKey:@"org_safeexambrowser_elevateWindowLevels"];
         }
         
+        BOOL devBypassQuit = SEBDevBypassQuitEnabled();
         if (!allowSwitchToThirdPartyApps) {
             // if switching to third party apps not allowed
             presentationOptions =
@@ -7846,15 +7870,15 @@ conditionallyForWindow:(NSWindow *)window
             NSApplicationPresentationHideDock +
             (showMenuBar ? 0 : NSApplicationPresentationHideMenuBar) +
             NSApplicationPresentationDisableProcessSwitching +
-            NSApplicationPresentationDisableForceQuit +
-            NSApplicationPresentationDisableSessionTermination;
+            (devBypassQuit ? 0 : NSApplicationPresentationDisableForceQuit) +
+            (devBypassQuit ? 0 : NSApplicationPresentationDisableSessionTermination);
         } else {
             presentationOptions =
             (showMenuBar ? 0 : NSApplicationPresentationHideMenuBar) +
             NSApplicationPresentationHideDock +
             NSApplicationPresentationDisableAppleMenu +
-            NSApplicationPresentationDisableForceQuit +
-            NSApplicationPresentationDisableSessionTermination;
+            (devBypassQuit ? 0 : NSApplicationPresentationDisableForceQuit) +
+            (devBypassQuit ? 0 : NSApplicationPresentationDisableSessionTermination);
         }
     
     @try {
@@ -9019,6 +9043,15 @@ conditionallyForWindow:(NSWindow *)window
         quittingFromSPSCacheUpload = [senderClass isEqualTo:TransmittingCachedScreenShotsViewController.class];
     }
     if (!quittingFromSPSCacheUpload && _screenProctoringController && _screenProctoringController.sessionIsClosing) {
+        return;
+    }
+    if (SEBDevBypassQuitEnabled()) {
+        [[NSRunningApplication currentApplication] activateWithOptions:(NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps)];
+        if (quittingFromSPSCacheUpload) {
+            [self quitFromTransmittingCachedScreenShots];
+        } else {
+            [self quitSEBOrSession];
+        }
         return;
     }
     // Load quitting preferences from the system's user defaults database
